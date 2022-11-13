@@ -1,0 +1,624 @@
+---
+title: "Churn Telecom"
+subtitle: "Predizendo o cancelamento de assinatura"
+author: "Ícaro Pinheiro - Estatístico e Analista de Dados"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+       highlight: textmate
+       theme: flatly
+       number_sections: yes
+       toc: yes
+       toc_float:
+         collapsed: yes
+         smooth_scroll: no
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+# Contexto
+
+O cancelamento de assinatura é uma pedra no sapato de empresas de telecomunicações e streaming, por exemplo, pois traz instabilidade financeira e prejudica o planejamento estratégico da companhia. Por isso, fazer um acompanhamento da taxa de cancelamento ou Churn Rate é fundamental para manter o negócio vivo e de pé. Mas além de monitorar o indicador, é possível prever quando um cliente deve cancelar sua assinatura? Sim, é possível e é isso que vamos mostrar logo mais. Seja bem vindo e te desejo uma boa leitura!
+
+## Origem dos dados
+
+Os dados que vamos utilizar para aplicar aprendizado de máquina estão <a class="au lc" href="https://raw.githubusercontent.com/carlosfab/dsnp2/master/datasets/WA_Fn-UseC_-Telco-Customer-Churn.csv" rel="noopener ugc nofollow" target="_blank">aqui</a>.
+
+## Objetivo
+
+Esta análise tem por finalidade prever o cancelamento de assinatura por parte do cliente, aplicando um modelo de aprendizado de máquina.
+
+# Pacotes
+
+```{r packages}
+library(DescTools)
+library(tidyverse)
+library(tidymodels)
+library(reactable)
+library(janitor)
+library(highcharter)
+library(sparkline)
+library(corrplot)
+library(patchwork)
+library(rmarkdown)
+library(knitr)
+library(kableExtra)
+library(upstartr)
+library(tictoc)
+library(vip)
+theme_set(theme_light(18)) 
+```
+
+# Carregando os dados
+
+```{r dados}
+dados = tibble(read_csv("C:/Users/icaro/Documents/Meu_Portfolio/Churn_Telecom/WA_Fn-UseC_-Telco-Customer-Churn.csv"))
+```
+
+O que temos dentro desse conjunto?
+
+```{r mostrar o conjunto}
+paged_table(dados)
+```
+
+Então temos um dataset com `r nrow(dados)` registros/observações e `r ncol(dados)` atributos ou melhor, variáveis.
+
+# Exploratória (EDA)
+
+Vamos explorar nosso dataset, começando por conhecer nossas variáveis.
+
+```{r tipo var, fig.align = 'center'}
+# contagem
+vars = 
+  tibble(
+    tipos = c("quantitativa", "qualitativa"),
+    colunas = 
+      c(
+        dados %>% select(where(is.numeric)) %>% ncol(),
+        dados %>% select(where(is.character)) %>% ncol()
+    ))
+
+# porcentagem
+vars = 
+  vars %>% 
+  mutate(
+    porcent = round(colunas / sum(colunas), digits = 2)
+  )
+
+# rótulos
+rotulo = paste(str_to_title(vars$tipos), " (", vars$porcent * 100, "%", ")", sep = "")
+
+# gráfico
+pie(
+  x = vars$colunas, 
+  labels = rotulo, 
+  col = c("skyblue2", "skyblue4"),
+  border = "white"
+)
+title(
+  main = "Tipo de Variáveis", 
+  cex.main = 2, 
+  font.main = 4, 
+  col.main = "skyblue4"
+  )
+```
+
+Temos que em sua maior parte, nosso conjunto de dados é formado por variável qualitativa nominal.
+
+Antes de iniciarmos a análise exploratória, vamos realizar alguns ajustes no dataset.
+
+1.  Excluir o campo de ID e padronizar o nome das variáveis.
+
+2.  Transformando o campo Senior Citizen em string.
+
+```{r ajustes}
+# padronizando os nomes da vars, excluir a coluna com o ID
+dados = 
+  dados %>% select(-customerID) %>% clean_names()
+
+# formatando o campo senior citizen
+dados$senior_citizen = ifelse(dados$senior_citizen == 0, 'No', 'Yes')
+```
+
+## Sumário
+
+Agora sim, vamos realizar a construção de um sumário separando entre variáveis numérica e categórica.
+
+```{r sumario quali}
+# Sumário - Variáveis Categóricas
+sumario_character = 
+  dados %>%
+  select(where(is.character)) %>%
+  as.list() %>%
+  enframe(name = "variavel", value = "valores") %>%
+  mutate(
+    n_missing = map_dbl(valores, ~sum(is.na(.x))),
+    complete_rate = 1 - n_missing/map_dbl(valores, ~length(.x)),
+    min = map_dbl(valores, ~min(str_length(.x))),
+    max = map_dbl(valores, ~max(str_length(.x))),
+    # empty = map_dbl(valores, ~sum(str_detect("^$", .x))),
+    n_unique = map_dbl(valores, ~n_distinct(.x)),
+    whitespace = map_dbl(valores, ~sum(str_detect("^[:blank:]+$", .x)))
+  ) %>%
+  arrange(variavel != "churn") 
+
+sumario_character %>%
+  reactable(
+    wrap = FALSE, 
+    resizable = TRUE,
+    fullWidth = TRUE,
+    defaultColDef = colDef(width = 90),
+    columns = list(
+      valores = colDef(show = FALSE),
+      variavel = colDef("Variável", minWidth = 230, width = 230)
+    ),
+    details = function(index) {
+      variavel_chr <- sumario_character[index, "variavel", drop = TRUE]
+      dados %>%
+        tabyl(!!sym(variavel_chr)) %>% arrange(desc(n)) %>%
+        reactable(columns = list(percent = colDef("%", format = colFormat(percent = TRUE, digits = 1))), width = 500)
+    }
+  )
+```
+
+Agora para as variáveis numéricas.
+
+```{r sumario quanti}
+# Sumário - Variáveis Numéricas
+sumario_numeric <- dados %>%
+  select(where(is.numeric)) %>%
+  as.list() %>%
+  enframe(name = "variavel", value = "valores") %>%
+  mutate(
+    n_missing = map_dbl(valores, ~sum(is.na(.x))),
+    complete_rate = 1 - n_missing/map_dbl(valores, ~length(.x)),
+    mean = map_dbl(valores, ~mean(.x)),
+    sd = map_dbl(valores, ~sd(.x)),
+    min = map_dbl(valores, ~min(.x)),
+    median = map_dbl(valores, ~median(.x)),
+    max = map_dbl(valores, ~max(.x))
+  ) %>%
+  mutate(across(where(is.numeric), round, digits = 1))
+
+sumario_numeric %>%
+  reactable(
+    wrap = FALSE, 
+    resizable = TRUE,
+    fullWidth = TRUE,
+    defaultColDef = colDef(width = 90),
+    columns = list(
+      valores = colDef(cell = function(values) {sparkline(table(cut(values, min(n_distinct(values), 15))), type = "bar")}),
+      variavel = colDef("Variável", minWidth = 230, width = 230)
+    ),
+    details = function(index) {
+      hchart(sumario_numeric[index, "valores"][[1]][[1]])
+    }
+  )
+```
+
+## Relação entre as explicativas
+
+### Correlação variáveis numéricas
+
+```{r relacao exp num, fig.align='center'}
+# Correlações entre as numéricas
+dados %>% 
+  select(where(is.numeric)) %>% 
+  filter(!is.na(dados$total_charges)) %>%  
+  cor() %>% 
+  corrplot(method = "color", 
+           order = "hclust", 
+           type = "upper", 
+           addCoef.col = "black",
+           tl.col = "black",
+           cl.align.text = "l")
+```
+
+### Sankey explicativas categóricas
+
+```{r relacao exp categ, fig.width=8, fig.height=5}
+# Sankey das explicativas categóricas
+dados %>%
+  select(where(is.character), -churn) %>%
+  data_to_sankey() %>%
+  hchart("sankey")
+```
+
+### Relação com a variável resposta
+
+```{r base}
+# base transformada
+churn_numeric_long = 
+  dados %>%
+  select(where(is.numeric), churn) %>%
+  pivot_longer(-churn, names_to = "variavel", values_to = "valor")
+```
+
+#### Variáveis numéricas
+
+```{r var num, fig.width = 10, fig.height = 7}
+# plot base
+plot_base = 
+  churn_numeric_long %>%
+  ggplot(aes(x = valor)) +
+  facet_wrap(~variavel, scale = "free", ncol = 1) +
+  theme(axis.text = element_blank(),
+        axis.title = element_blank())
+
+# Histogramas
+p1 <- plot_base + geom_histogram(aes(fill = churn), position = "identity")
+
+# Densidades
+p2  <- plot_base + geom_density(aes(fill = churn), alpha = 0.4, show.legend = FALSE)
+
+# Boxplots
+p3 <- plot_base + geom_boxplot(aes(fill = churn), show.legend = FALSE)
+
+# KS
+p4 <- plot_base + stat_ecdf(aes(colour = churn), show.legend = FALSE)
+
+# plot all
+(p4 + p3 + p2 + p1) + plot_layout(nrow = 1)
+```
+
+#### Variáveis categóricas
+
+```{r var categ}
+churn_character_long = 
+  dados %>%
+  select(where(is.character), churn) %>%
+  pivot_longer(-churn, names_to = "variavel", values_to = "valor")
+```
+
+```{r base 2, fig.height = 20, fig.width = 10}
+# bar plot base
+bar_plot = 
+  churn_character_long %>%
+  count(variavel, valor, churn) %>%
+  group_by(variavel, valor) %>%
+  mutate(
+    p_churn = sum(n[churn == "sim"], na.rm = TRUE)/sum(n, na.rm = TRUE)
+  ) %>%
+  group_by(variavel) %>%
+  mutate(
+    valor = reorder_within(valor, p_churn, variavel)
+  ) %>%
+  ggplot(aes(y = valor, x = n, fill = churn)) +
+  facet_wrap(~variavel, scales = "free", ncol = 1) +
+  scale_y_reordered() +
+  theme(axis.text.x = element_blank(),
+        axis.title = element_blank())
+
+# Position stack
+p1 = bar_plot + geom_col(show.legend = FALSE, position = "stack")
+
+# Position fill
+p2 = bar_plot + geom_col(show.legend = TRUE, position = "fill")
+
+p1 + p2
+```
+
+# Transformação
+
+Vimos que há variáveis categóricas que precisam de alteração para fator, além agrupar os casos de clientes que não possuem serviço de internet ao grupo dos 'NO', pois representam a "mesma" situação.
+
+```{r transformacao}
+# tranformando em fator as variaveis categoricas
+dados_transf = 
+  dados %>% 
+  mutate(
+    across(
+      c(gender:dependents, 
+        phone_service, multiple_lines,
+        online_security:streaming_movies,
+        paperless_billing, churn), 
+      factor),
+    multiple_lines = 
+      ifelse(multiple_lines == 'No phone service', 'No', 
+             ifelse(multiple_lines == 'No', 'No', 'Yes')),
+    online_security = 
+      ifelse(online_security == 'No internet service', 'No', 
+             ifelse(online_security == 'No', 'No', 'Yes')),
+    online_backup = 
+      ifelse(online_backup == 'No internet service', 'No', 
+             ifelse(online_backup == 'No', 'No', 'Yes')),
+    device_protection = 
+      ifelse(device_protection == 'No internet service', 'No', 
+             ifelse(device_protection == 'No', 'No', 'Yes')),
+    tech_support = 
+      ifelse(tech_support == 'No internet service', 'No', 
+             ifelse(tech_support == 'No', 'No', 'Yes')),
+    streaming_tv = 
+      ifelse(streaming_tv == 'No internet service', 'No', 
+             ifelse(streaming_tv == 'No', 'No', 'Yes')),
+    streaming_movies = 
+      ifelse(streaming_movies == 'No internet service', 'No', 
+             ifelse(streaming_movies == 'No', 'No', 'Yes'))
+    )
+```
+
+# Modelagem
+
+Vamos iniciar o processo de modelagem dos dados com a separação da base em teste e treino.
+
+```{r separar}
+# marcando a base em teste e treino
+set.seed(1232)
+churn_split = 
+  initial_split(data = dados_transf, strata = churn, prop = 0.75)
+
+# separando a base em treino
+training_df = training(churn_split)
+# separando a base em teste
+testing_df = testing(churn_split)
+```
+
+## Validação cruzada
+
+```{r cross validation}
+# avaliação dos modelos com cross-validation
+folds = 
+  vfold_cv(training_df, v = 10, strata = churn)
+```
+
+## Receita
+
+Na receita informamos as etapas que precisamos realizar para preparar a base de treino do modelo.
+
+No nosso caso, a receita inclui:
+
+-   Correção do balanceamento de classes.
+
+-   Exclusão de variáveis com alto coeficiente de correlação.
+
+-   Normalização das variáveis numéricas.
+
+-   Substituição de valores faltantes pela mediana em campos númericos.
+
+-   Transformação das variáveis qualitativas nominais em dummy.
+
+```{r receita}
+# preparando os dados 
+churn_rec = 
+  recipe(churn ~ ., data = training_df) %>% 
+  themis::step_downsample(churn) %>% 
+  step_corr(all_numeric_predictors()) %>% # correlação entre explicativas
+  step_normalize(all_numeric()) %>% # normalizar vars
+  step_rm(total_charges) %>% # Tratamento de missings
+  step_impute_median(all_numeric()) %>% # Substituir os missings com a mediana 
+  step_dummy(all_nominal(), -churn) # Transformando as variaveis nominais em dummy
+  
+# base processada  
+baked = bake(prep(churn_rec), new_data = NULL)
+paged_table(baked)
+```
+
+## Modelo Random Forest
+
+```{r modelo}
+# modelo de randow forest (árvore aleatória)
+rf_mod = 
+  rand_forest(
+    trees = 300,
+    mtry = tune(),
+    min_n = tune()
+  ) %>%
+  set_mode('classification') %>% 
+  set_engine('ranger', importance = 'impurity')
+```
+
+## Workflow
+
+```{r workflow}
+rf_workflow = 
+  workflow() %>% 
+  add_recipe(churn_rec) %>% 
+  add_model(rf_mod)
+```
+
+## Tunagem
+
+```{r tunagem, cache = TRUE}
+set.seed(1)
+tic("modelo rf")
+tunagem = 
+  tune_grid(
+    rf_workflow,
+    resamples = folds,
+    grid = 10,
+    metrics = metric_set(roc_auc, precision, accuracy, f_meas),
+    control = control_grid(verbose = TRUE, allow_par = FALSE)
+    )
+toc()
+```
+
+## Avaliações
+
+```{r avaliacao, fig.align='center', fig.width=6}
+# tabela
+show_best(tunagem, "roc_auc") %>% 
+  kable(format = 'html', align = 'l', digits = 3) %>% 
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+## Atualização do workflow
+
+Atualizando o workflow com os hiperparamêtros encontrados.
+
+```{r atualizacao wf}
+# atualizando wf
+wf = 
+  rf_workflow %>% 
+  finalize_workflow(select_best(tunagem, "roc_auc"))
+
+```
+
+## Ajuste
+
+```{r ajuste, fig.align='center'}
+# last fit
+ajuste_final = 
+  last_fit(
+    wf, 
+    churn_split, 
+    metrics = 
+      metric_set(accuracy, roc_auc, f_meas, specificity, precision, recall)
+    )
+
+# métricas de desempenho
+collect_metrics(ajuste_final) %>% 
+  kable(format = 'html', digits = 3, align = 'l') %>% 
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+```{r predicao, fig.align='center'}
+# predicoes
+pred_base_teste = collect_predictions(ajuste_final)
+
+# curva roc
+roc = 
+  pred_base_teste %>% 
+  roc_curve(churn, .pred_No) %>%
+  autoplot()
+
+# curva de lift
+lift = 
+  pred_base_teste %>% 
+  lift_curve(churn, .pred_No) %>%
+  autoplot()
+
+# KS
+ks = 
+  pred_base_teste %>% 
+  ggplot(aes(x = .pred_Yes, colour = churn)) +
+  stat_ecdf(show.legend = FALSE)
+  
+# distribuicao
+dist = 
+  pred_base_teste %>% 
+  ggplot(aes(x = .pred_Yes, fill = churn)) +
+  geom_density() +
+  theme(axis.title = element_blank())
+  
+(roc + lift)/(ks + dist)
+```
+
+A conclusão que tiramos daqui é que o modelo apresentou razoável acurácia, separou bem os grupos, mas há espaço para melhorar, pois existe um ponto central no gráfico de densidade que mostra que o modelo não conseguiu acertar.
+
+## Modelo final
+
+Ajuste final com a base inteira.
+
+```{r modelo final}
+modelo_final = fit(wf, dados_transf)
+```
+
+## Importância das variáveis
+
+Avaliação das contribuição das variáveis para o modelo.
+
+```{r vip}
+vip(modelo_final$fit$fit)
+```
+
+## Armazenamento
+
+Podemos salvar o modelo para realizar as predições futuramente, sem a necessidade de rodar o script sempre que precisar.
+
+```{r armazenar modelo}
+saveRDS(modelo_final, file = "modelo_final.rds")
+```
+
+## Matrix de confusão
+
+Vamos confrontar as previsões do modelo com a realidade.
+
+```{r confusion, fig.align='center'}
+predizer = 
+  tibble(
+    cbind(
+      dados_transf$churn, 
+      predict(modelo_final, new_data = dados_transf, type = 'prob')
+      )
+  )
+
+predizer = 
+  predizer %>% 
+  rename(churn_observado = `dados_transf$churn`) %>% 
+  mutate(churn_esperado = ifelse(.pred_No > .pred_Yes, 'No', 'Yes'),
+         .pred_No = round(.pred_No, digits = 3),
+         .pred_Yes = round(.pred_Yes, digits = 3))
+
+# matriz
+predizer %>% 
+  tabyl(churn_observado, churn_esperado) %>% 
+  adorn_percentages(denominator = "all") %>%  
+  adorn_pct_formatting() %>% 
+  adorn_title(row_name = "Observado", col_name = "Esperado") %>% 
+  kable(format = "html", align = 'c', caption = "Matriz de confusão") %>% 
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+## Predição
+
+Vamos testar a predição do modelo, inserindo os dados de um 'novo cliente'.
+
+```{r novo cliente, fig.align='center'}
+novo_cliente = 
+  data.frame(
+    gender = 'Female',
+    senior_citizen = 'Yes',
+    partner = 'Yes',
+    dependents = 'Yes',
+    tenure = 25,
+    phone_service = 'No',
+    multiple_lines = 'No',
+    internet_service = 'DSL',
+    online_security = 'No',
+    online_backup = 'No',
+    device_protection = 'No',
+    tech_support = 'No',
+    streaming_tv = 'Yes',
+    streaming_movies = 'Yes',
+    contract = 'Month-to-month',
+    paperless_billing = 'Yes',
+    payment_method = 'Electronic check',
+    monthly_charges = 55.55,
+    total_charges = 290.50
+    )
+
+
+predict(modelo_final, new_data = novo_cliente, type = 'prob') %>% 
+  kable(
+    format = "html", 
+    digits = 3, 
+    align = "c", 
+    caption = "Novo cliente",
+    col.names = c("Não", "Sim")
+    ) %>% 
+  kable_styling(
+    full_width = FALSE, 
+    bootstrap_options = c("striped", "hover", "condensed", "responsive")
+    )
+
+```
+
+Neste exemplo, com a probabilidade maior para não, então assumimos que o cliente não deve cancelar sua assinatura.
+
+# Final
+
+Recaptulando o fizemos aqui até.
+
+-   Análise descritiva da base, explorando as relações entre as variáveis.
+
+-   Transformação necessária para aplicação do modelo.
+
+-   Modelagem, com a especificação da `f(x)` - receita - workflow até o armazenamento do modelo e avaliação.
+
+Ao final deste estudo, podemos concluir que o modelo conseguiu realizar um trabalho razoável, com precisão de 0,89. No entanto, a matriz de confusão nos mostrou que o modelo errou bastante, onde previu que o cliente cancelaria a assinatura quando na verdade não cancelou.
