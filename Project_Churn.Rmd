@@ -178,11 +178,11 @@ sumario_numeric <- dados %>%
   mutate(
     n_missing = map_dbl(valores, ~sum(is.na(.x))),
     complete_rate = 1 - n_missing/map_dbl(valores, ~length(.x)),
-    mean = map_dbl(valores, ~mean(.x)),
-    sd = map_dbl(valores, ~sd(.x)),
-    min = map_dbl(valores, ~min(.x)),
-    median = map_dbl(valores, ~median(.x)),
-    max = map_dbl(valores, ~max(.x))
+    mean = map_dbl(valores, ~mean(.x, na.rm = T)),
+    sd = map_dbl(valores, ~sd(.x, na.rm = T)),
+    min = map_dbl(valores, ~min(.x, na.rm = T)),
+    median = map_dbl(valores, ~median(.x, na.rm = T)),
+    max = map_dbl(valores, ~max(.x, na.rm = T))
   ) %>%
   mutate(across(where(is.numeric), round, digits = 1))
 
@@ -230,7 +230,7 @@ dados %>%
   hchart("sankey")
 ```
 
-### Relação com a variável resposta
+## Relação com a variável resposta
 
 ```{r base}
 # base transformada
@@ -240,7 +240,7 @@ churn_numeric_long =
   pivot_longer(-churn, names_to = "variavel", values_to = "valor")
 ```
 
-#### Variáveis numéricas
+### Variáveis numéricas
 
 ```{r var num, fig.width = 10, fig.height = 7}
 # plot base
@@ -267,7 +267,7 @@ p4 <- plot_base + stat_ecdf(aes(colour = churn), show.legend = FALSE)
 (p4 + p3 + p2 + p1) + plot_layout(nrow = 1)
 ```
 
-#### Variáveis categóricas
+### Variáveis categóricas
 
 ```{r var categ}
 churn_character_long = 
